@@ -1,0 +1,61 @@
+[build-system]
+requires = ["setuptools>=63", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vectr-lab"
+version = "0.1.0"
+description = "Multi-asset portfolio backtesting and research scaffold built on vectorbt"
+readme = "README.md"
+authors = [{ name = "vectr-lab" }]
+license = { text = "MIT" }
+requires-python = ">=3.10"
+dependencies = [
+    "pandas>=1.5",
+    "numpy>=1.23",
+    "vectorbt>=0.24.6",
+    "yfinance>=0.2.30",
+    "pydantic>=1.10,<2.0",
+    "pyyaml>=6.0",
+    "plotly>=5.15",
+    "rich>=13.3",
+    "typer[all]>=0.9",
+    "scipy>=1.9",
+    "jinja2>=3.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.2",
+    "pytest-cov>=4.0",
+    "freezegun>=1.2",
+]
+
+[project.scripts]
+vectr = "vectr_lab.cli.app:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.black]
+line-length = 88
+target-version = ["py310"]
+include = "src|tests"
+
+[tool.isort]
+profile = "black"
+line_length = 88
+known_first_party = ["vectr_lab"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 88
+select = ["E", "F", "B", "I", "W", "C90"]
+ignore = ["E501"]
+exclude = [
+    ".git",
+    "__pycache__",
+    "build",
+    "dist",
+]
+
