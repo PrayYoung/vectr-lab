@@ -8,6 +8,7 @@ __pycache__/
 artifacts/
 *.parquet
 *.html
+*.egg-info/
 .ipynb_checkpoints/
 build/
 dist/

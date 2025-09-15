@@ -4,6 +4,7 @@ set -euo pipefail
 COMMAND="${1:-help}"
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")"/.. && pwd)"
 VENV_DIR="${PROJECT_DIR}/.venv"
+UV_ENV_CMD=(env UV_PROJECT_ENVIRONMENT="${VENV_DIR}")
 
 usage() {
   cat <<USAGE
@@ -38,16 +39,14 @@ ensure_env() {
 
 run_in_env() {
   ensure_env
-  UV_PYTHON="${VENV_DIR}/bin/python"
-  UV="uv --python ${UV_PYTHON}"
-  ${UV} "$@"
+  "${UV_ENV_CMD[@]}" uv "$@"
 }
 
 case "${COMMAND}" in
   bootstrap)
     ensure_uv
     uv venv "${VENV_DIR}"
-    uv pip install --python "${VENV_DIR}/bin/python" -e "${PROJECT_DIR}[dev]"
+    "${UV_ENV_CMD[@]}" uv pip install -e "${PROJECT_DIR}[dev]"
     ;;
   install)
     run_in_env pip install -e "${PROJECT_DIR}[dev]"

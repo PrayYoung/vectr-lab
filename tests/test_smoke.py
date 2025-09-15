@@ -6,7 +6,7 @@ from vectr_lab.strategies.ma_cross import MovingAverageCrossStrategy
 
 
 def _build_synthetic() -> dict[str, pd.DataFrame]:
-    index = pd.date_range("2022-01-01", periods=60, freq="H")
+    index = pd.date_range("2022-01-01", periods=60, freq="h")
     frames = {}
     for offset, ticker in enumerate(["AAA", "BBB", "CCC"]):
         base = pd.Series(range(60), index=index).astype(float) + offset

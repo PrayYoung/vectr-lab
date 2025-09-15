@@ -25,7 +25,10 @@ class BacktestResult:
 
     @property
     def equity_curve(self) -> pd.Series:
-        return self.portfolio.value()
+        value = self.portfolio.value()
+        if isinstance(value, pd.DataFrame):
+            return value.sum(axis=1)
+        return value
 
     @property
     def trades(self) -> pd.DataFrame:

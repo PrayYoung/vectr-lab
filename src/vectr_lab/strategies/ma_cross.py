@@ -47,8 +47,8 @@ class MovingAverageCrossStrategy(BaseStrategy):
         cross_up = (fast > slow) & (fast.shift(1) <= slow.shift(1))
         cross_down = (fast < slow) & (fast.shift(1) >= slow.shift(1))
 
-        df["entry_long"] = cross_up.shift(1).fillna(False)
-        exit_cross = cross_down.shift(1).fillna(False)
+        df["entry_long"] = cross_up.shift(1).fillna(False).astype(bool)
+        exit_cross = cross_down.shift(1).fillna(False).astype(bool)
 
         trail_mult = float(self.params.get("trail_mult", 3.0))
         r_multiple_tp = float(self.params.get("r_multiple_tp", 2.0))
@@ -56,11 +56,13 @@ class MovingAverageCrossStrategy(BaseStrategy):
 
         df["sl_price"] = close - trail_mult * atr
         df["tp_price"] = close + r_multiple_tp * (close - df["sl_price"])
-        df["sl_price"] = df["sl_price"].clip(lower=0).fillna(method="ffill")
-        df["tp_price"] = df["tp_price"].fillna(method="ffill")
+        df["sl_price"] = df["sl_price"].clip(lower=0).ffill()
+        df["tp_price"] = df["tp_price"].ffill()
 
         if time_stop_bars > 0:
-            df["exit_time"] = df["entry_long"].shift(time_stop_bars).fillna(False)
+            df["exit_time"] = (
+                df["entry_long"].shift(time_stop_bars).fillna(False).astype(bool)
+            )
         else:
             df["exit_time"] = False
 
