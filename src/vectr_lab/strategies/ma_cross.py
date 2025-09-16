@@ -39,16 +39,26 @@ class MovingAverageCrossStrategy(BaseStrategy):
             raise ValueError("Features missing from dataframe; run compute_features first")
 
         df = pd.DataFrame(index=data.index)
-        fast = data["sma_fast"]
-        slow = data["sma_slow"]
-        close = data["close"]
-        atr = data["atr"]
+
+        def _ensure_series(obj: pd.Series | pd.DataFrame, name: str) -> pd.Series:
+            if isinstance(obj, pd.DataFrame):
+                if obj.shape[1] != 1:
+                    raise ValueError(f"Expected single column for {name}")
+                series = obj.iloc[:, 0]
+                series.name = name
+                return series
+            return obj
+
+        fast = _ensure_series(data["sma_fast"], "sma_fast")
+        slow = _ensure_series(data["sma_slow"], "sma_slow")
+        close = _ensure_series(data["close"], "close")
+        atr = _ensure_series(data["atr"], "atr")
 
         cross_up = (fast > slow) & (fast.shift(1) <= slow.shift(1))
         cross_down = (fast < slow) & (fast.shift(1) >= slow.shift(1))
 
-        df["entry_long"] = cross_up.shift(1).fillna(False).astype(bool)
-        exit_cross = cross_down.shift(1).fillna(False).astype(bool)
+        df["entry_long"] = cross_up.shift(1, fill_value=False)
+        exit_cross = cross_down.shift(1, fill_value=False)
 
         trail_mult = float(self.params.get("trail_mult", 3.0))
         r_multiple_tp = float(self.params.get("r_multiple_tp", 2.0))
@@ -60,9 +70,7 @@ class MovingAverageCrossStrategy(BaseStrategy):
         df["tp_price"] = df["tp_price"].ffill()
 
         if time_stop_bars > 0:
-            df["exit_time"] = (
-                df["entry_long"].shift(time_stop_bars).fillna(False).astype(bool)
-            )
+            df["exit_time"] = df["entry_long"].shift(time_stop_bars, fill_value=False)
         else:
             df["exit_time"] = False
 

@@ -1,0 +1,9 @@
+name: ma_cross
+parameters:
+  ma_fast: 10
+  ma_slow: 50
+  atr_len: 14
+  trail_mult: 3.0
+  r_multiple_tp: 2.0
+  time_stop_bars: 10
+  filters: {}

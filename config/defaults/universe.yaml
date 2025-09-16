@@ -1,0 +1,11 @@
+tickers:
+  - AAPL
+  - MSFT
+  - SPY
+timeframe: 1d
+start: 2022-01-01
+end: 2022-12-31
+session: 0930-1600
+calendar: NYSE
+fees_pct: 0.0005
+slippage_pct: 0.0005

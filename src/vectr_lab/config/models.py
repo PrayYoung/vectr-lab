@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field, PositiveFloat, PositiveInt, validator
@@ -25,6 +25,21 @@ class UniverseConfig(BaseModel):
         if not value:
             raise ValueError("At least one ticker must be specified")
         return value
+
+    @validator("start", "end", pre=True)
+    def _coerce_datetime(cls, value: Any) -> Optional[datetime]:
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            return value
+        if isinstance(value, date):
+            return datetime.combine(value, datetime.min.time())
+        if isinstance(value, str):
+            try:
+                return datetime.fromisoformat(value)
+            except ValueError as exc:  # pragma: no cover - invalid formats bubble up
+                raise ValueError(f"Invalid datetime string: {value}") from exc
+        raise ValueError("Unsupported datetime value")
 
 
 class StrategyConfig(BaseModel):

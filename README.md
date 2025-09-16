@@ -10,6 +10,19 @@ vectr data pull
 vectr backtest run
 ```
 
+### One-stop runner
+
+Prefer a single command? Use the bundled script:
+
+```bash
+python scripts/run_experiment.py \
+  --universe config/defaults/universe.yaml \
+  --strategy config/defaults/strategy.yaml \
+  --risk config/defaults/risk.yaml
+```
+
+Override any of those paths with your own YAML files; the script will download data (using cache if present), run the backtest, and emit artifacts plus a report under `./artifacts/runs/<timestamp>/`.
+
 ## Environment management with uv
 
 If you prefer using [uv](https://github.com/astral-sh/uv) for dependency management, install `uv` and run:
