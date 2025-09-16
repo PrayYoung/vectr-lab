@@ -3,19 +3,19 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import Dict
 
-import numpy as np
 import pandas as pd
 import yfinance as yf
 
 from vectr_lab.config.models import UniverseConfig
 from vectr_lab.data.paths import cache_path_for
-from vectr_lab.utils.log import get_logger
+from vectr_lab.utils.log import get_logger, pop_context, push_context
 
 _LOG = get_logger(__name__)
 
@@ -31,6 +31,25 @@ def _env_flag(name: str) -> bool:
 
 _DEBUG = _env_flag("VECTR_LAB_DEBUG")
 _STRICT = _env_flag("VECTR_LAB_STRICT")
+
+
+def _log_frame_stats(ticker: str, frame: pd.DataFrame, source: str) -> None:
+    freq_guess = pd.infer_freq(frame.index)
+    dup_count = int(frame.index.duplicated().sum())
+    tz = getattr(frame.index, "tz", None)
+    tz_name = tz.zone if hasattr(tz, "zone") else tz
+    _LOG.info(
+        "ohlcv_normalized ticker=%s source=%s rows=%d start=%s end=%s freq=%s tz=%s duplicates=%d columns=%s",
+        ticker,
+        source,
+        len(frame),
+        frame.index.min(),
+        frame.index.max(),
+        freq_guess or "unknown",
+        tz_name,
+        dup_count,
+        list(frame.columns),
+    )
 
 
 def _meta_path(cache_path: Path) -> Path:
@@ -93,7 +112,7 @@ def _select_field(df: pd.DataFrame, ticker: str, field: str) -> pd.Series:
     if isinstance(series, pd.DataFrame):
         if _STRICT:
             raise ValueError(f"{field} for {ticker} expanded to shape {series.shape}")
-        if _DEBUG:
+        if _DEBUG or _LOG.isEnabledFor(logging.DEBUG):
             _LOG.debug("Collapsing multi-column field %s[%s] shape=%s", field, ticker, series.shape)
         series = series.iloc[:, 0]
     return series
@@ -128,6 +147,16 @@ def _normalize_ohlcv(frame: pd.DataFrame, ticker: str) -> pd.DataFrame:
     if hasattr(df.index, "tz") and df.index.tz is not None:
         df.index = df.index.tz_convert("UTC").tz_localize(None)
     df.index.name = "timestamp"
+    if _DEBUG or _LOG.isEnabledFor(logging.DEBUG):
+        freq_guess = pd.infer_freq(df.index)
+        _LOG.debug(
+            "normalized dataframe shape=%s columns=%s start=%s end=%s freq=%s",
+            df.shape,
+            list(df.columns),
+            df.index.min(),
+            df.index.max(),
+            freq_guess or "unknown",
+        )
     return df
 
 
@@ -159,27 +188,33 @@ def load_cached_or_download(ticker: str, universe: UniverseConfig, force: bool =
     """Load cached parquet data or fetch it from yfinance."""
 
     cache_path = cache_path_for(ticker, universe.timeframe)
-    if cache_path.exists() and not force:
-        frame, meta = _read_cache(cache_path)
-        if frame is not None:
-            needs_rewrite = meta is None or meta.get("schema_version") != _CACHE_SCHEMA_VERSION
-            if isinstance(frame.columns, pd.MultiIndex):
-                needs_rewrite = True
-            try:
-                normalized = _normalize_ohlcv(frame, ticker)
-            except Exception as exc:
-                _LOG.warning("Cached data for %s invalid, rebuilding: %s", ticker, exc)
-            else:
-                frame = normalized
-                if needs_rewrite:
-                    _LOG.info("Rewriting cache for %s to schema %s", ticker, _CACHE_SCHEMA_VERSION)
-                    _write_cache(cache_path, frame)
-                return frame
+    token = push_context(ticker=ticker)
+    try:
+        if cache_path.exists() and not force:
+            frame, meta = _read_cache(cache_path)
+            if frame is not None:
+                needs_rewrite = meta is None or meta.get("schema_version") != _CACHE_SCHEMA_VERSION
+                if isinstance(frame.columns, pd.MultiIndex):
+                    needs_rewrite = True
+                try:
+                    normalized = _normalize_ohlcv(frame, ticker)
+                except Exception as exc:
+                    _LOG.warning("Cached data for %s invalid, rebuilding: %s", ticker, exc)
+                else:
+                    frame = normalized
+                    if needs_rewrite:
+                        _LOG.info("Rewriting cache for %s to schema %s", ticker, _CACHE_SCHEMA_VERSION)
+                        _write_cache(cache_path, frame)
+                    _log_frame_stats(ticker, frame, source="cache")
+                    return frame
 
-    _LOG.info("Downloading %s", ticker)
-    frame = _download_ticker(ticker, universe)
-    _write_cache(cache_path, frame)
-    return frame
+        _LOG.info("Downloading %s", ticker)
+        frame = _download_ticker(ticker, universe)
+        _write_cache(cache_path, frame)
+        _log_frame_stats(ticker, frame, source="download")
+        return frame
+    finally:
+        pop_context(token)
 
 
 def download_universe(universe: UniverseConfig, force: bool = False) -> Dict[str, pd.DataFrame]:

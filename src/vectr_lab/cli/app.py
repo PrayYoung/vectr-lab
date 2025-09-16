@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 import pandas as pd
 import typer
@@ -22,7 +21,7 @@ from vectr_lab.data.ingest import download_universe
 from vectr_lab.reports import render_report
 from vectr_lab.strategies.breakout import BreakoutStrategy
 from vectr_lab.strategies.ma_cross import MovingAverageCrossStrategy
-from vectr_lab.utils.log import configure_logging
+from vectr_lab.utils.log import add_file_handler, configure_logging, pop_context, push_context
 from vectr_lab.utils.time import now_utc
 
 app = typer.Typer(help="vectr-lab research CLI")
@@ -72,13 +71,14 @@ def _make_strategy(config: StrategyConfig):
 def data_pull(
     universe_path: Optional[Path] = typer.Option(None, "--universe", help="Universe YAML path"),
     force: bool = typer.Option(False, "--force", help="Force re-download"),
+    rebuild_cache: bool = typer.Option(False, "--rebuild-cache", help="Normalize and rewrite cached data"),
 ) -> None:
     """Download and cache OHLCV data for a universe."""
 
     configure_logging()
     universe = _load_universe(universe_path)
     console.print(f"Downloading data for {len(universe.tickers)} tickers...")
-    download_universe(universe, force=force)
+    download_universe(universe, force=force or rebuild_cache)
     console.print("Done.")
 
 
@@ -88,51 +88,77 @@ def backtest_run(
     strategy_path: Optional[Path] = typer.Option(None, "--strategy"),
     risk_path: Optional[Path] = typer.Option(None, "--risk"),
     out: Optional[Path] = typer.Option(None, "--out", help="Output directory"),
+    debug: bool = typer.Option(False, "--debug", help="Enable debug logging"),
+    json_logs: bool = typer.Option(False, "--json-logs", help="Emit JSON logs"),
+    trace: List[str] = typer.Option([], "--trace", help="Dump per-ticker trace parquet", show_default=False, multiple=True),
+    rebuild_cache: bool = typer.Option(False, "--rebuild-cache", help="Normalize and rewrite cached data"),
 ) -> None:
     """Run a backtest for the given universe/strategy/risk pair."""
 
-    configure_logging()
-    universe = _load_universe(universe_path)
-    strategy_config = _load_strategy(strategy_path)
-    risk_config = _load_risk(risk_path)
-
-    console.print("Preparing data...")
-    market_data = download_universe(universe)
-
-    strategy = _make_strategy(strategy_config)
-    result = run_backtest(market_data, strategy, universe, risk_config)
-
-    metrics = compute_portfolio_metrics(result)
-    per_ticker = compute_per_ticker_metrics(result)
-
-    timestamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
-    out_dir = out or Path("artifacts/runs") / timestamp
+    run_id = now_utc().strftime("%Y%m%d-%H%M%S-%f")
+    out_dir = out or Path("artifacts/runs") / run_id
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    console.print(f"Writing artifacts to {out_dir}")
-    equity = result.equity_curve
-    trades = result.trades
-    equity.to_frame("equity").to_parquet(out_dir / "equity.parquet")
-    trades.to_parquet(out_dir / "trades.parquet")
-    with (out_dir / "stats.json").open("w", encoding="utf-8") as handle:
-        json.dump(metrics, handle, indent=2)
-    per_ticker.to_parquet(out_dir / "per_ticker.parquet")
+    configure_logging(debug=debug or bool(trace), json_logs=json_logs, trace=bool(trace))
+    add_file_handler(out_dir / "run.log", json_logs=json_logs)
 
-    equity_fig = equity_curve_figure(equity)
-    drawdown_fig = drawdown_figure(equity)
-    contribution_fig = contribution_bar(per_ticker)
+    run_token = push_context(run_id=run_id)
+    strategy_token = None
+    try:
+        universe = _load_universe(universe_path)
+        strategy_config = _load_strategy(strategy_path)
+        strategy_token = push_context(strategy=strategy_config.name)
+        risk_config = _load_risk(risk_path)
 
-    context = {
-        "generated_at": now_utc().isoformat(),
-        "metrics": metrics,
-        "per_ticker": per_ticker.reset_index().to_dict(orient="records"),
-        "equity_html": to_html(equity_fig, full_html=False, include_plotlyjs="cdn"),
-        "drawdown_html": to_html(drawdown_fig, full_html=False, include_plotlyjs=False),
-        "contribution_html": to_html(contribution_fig, full_html=False, include_plotlyjs=False),
-    }
+        console.print("Preparing data...")
+        market_data = download_universe(universe, force=rebuild_cache)
 
-    render_report(context, out_dir / "report.html")
-    console.print("Backtest complete.")
+        strategy = _make_strategy(strategy_config)
+        result = run_backtest(
+            market_data,
+            strategy,
+            universe,
+            risk_config,
+            run_id=run_id,
+            trace_tickers=[t.upper() for t in trace],
+        )
+
+        metrics = compute_portfolio_metrics(result)
+        per_ticker = compute_per_ticker_metrics(result)
+
+        console.print(f"Writing artifacts to {out_dir}")
+        equity = result.equity_curve
+        trades = result.trades
+        equity.to_frame("equity").to_parquet(out_dir / "equity.parquet")
+        trades.to_parquet(out_dir / "trades.parquet")
+        with (out_dir / "stats.json").open("w", encoding="utf-8") as handle:
+            json.dump(metrics, handle, indent=2)
+        per_ticker.to_parquet(out_dir / "per_ticker.parquet")
+
+        equity_fig = equity_curve_figure(equity)
+        drawdown_fig = drawdown_figure(equity)
+        contribution_fig = contribution_bar(per_ticker)
+
+        context = {
+            "generated_at": now_utc().isoformat(),
+            "metrics": metrics,
+            "per_ticker": per_ticker.reset_index().to_dict(orient="records"),
+            "equity_html": to_html(equity_fig, full_html=False, include_plotlyjs="cdn"),
+            "drawdown_html": to_html(drawdown_fig, full_html=False, include_plotlyjs=False),
+            "contribution_html": to_html(contribution_fig, full_html=False, include_plotlyjs=False),
+        }
+
+        render_report(context, out_dir / "report.html")
+
+        if result.trace_data:
+            for trace_ticker, trace_df in result.trace_data.items():
+                trace_df.to_parquet(out_dir / f"trace_{trace_ticker}.parquet")
+
+        console.print(f"Backtest complete. Run ID: {run_id}")
+    finally:
+        if strategy_token is not None:
+            pop_context(strategy_token)
+        pop_context(run_token)
 
 
 @scan_app.command("grid")

@@ -19,6 +19,8 @@ python scripts/run_experiment.py \
   --universe config/defaults/universe.yaml \
   --strategy config/defaults/strategy.yaml \
   --risk config/defaults/risk.yaml
+
+Add `--debug` for verbose diagnostics, `--json-logs` for machine-readable output, and repeatable `--trace TICKER` flags to dump per-ticker aligned arrays for deep dives (saved under `trace_<ticker>.parquet`).
 ```
 
 Override any of those paths with your own YAML files; the script will download data (using cache if present), run the backtest, and emit artifacts plus a report under `./artifacts/runs/<timestamp>/`.

@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 import os
-from typing import Dict, Mapping
+from typing import Dict, Iterable, Mapping, Optional
 
 import numpy as np
 import pandas as pd
@@ -14,7 +15,7 @@ from vectr_lab.config.models import RiskConfig, StrategyConfig, UniverseConfig
 from vectr_lab.risk.rules import apply_risk_rules
 from vectr_lab.risk.sizer import sizes_fixed_risk
 from vectr_lab.strategies.base import BaseStrategy
-from vectr_lab.utils.log import get_logger
+from vectr_lab.utils.log import get_logger, pop_context, push_context
 
 
 @dataclass
@@ -25,6 +26,7 @@ class BacktestResult:
     entries: pd.DataFrame
     exits: pd.DataFrame
     signals: Mapping[str, pd.DataFrame]
+    trace_data: Optional[Mapping[str, pd.DataFrame]] = None
 
     @property
     def equity_curve(self) -> pd.Series:
@@ -48,7 +50,6 @@ def _env_flag(name: str) -> bool:
     return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-_DEBUG = _env_flag("VECTR_LAB_DEBUG")
 _STRICT = _env_flag("VECTR_LAB_STRICT")
 _LOG = get_logger(__name__)
 
@@ -98,7 +99,7 @@ def _standardize_series(
         series = series.astype(float)
     series.name = ticker
 
-    if _DEBUG:
+    if _LOG.isEnabledFor(logging.DEBUG):
         _LOG.debug(
             "standardize %s[%s]: input=%s -> dtype=%s nulls=%s",
             label,
@@ -140,7 +141,7 @@ def _build_matrix(
         if frame.index.difference(index).any() or len(frame.columns) != len(tickers):
             raise ValueError(f"{label} matrix shape mismatch: {frame.shape}")
 
-    if _DEBUG:
+    if _LOG.isEnabledFor(logging.DEBUG):
         _LOG.debug("%s matrix -> shape %s", label, frame.shape)
 
     return frame
@@ -162,6 +163,9 @@ def run_backtest(
     strategy: BaseStrategy,
     universe: UniverseConfig,
     risk: RiskConfig,
+    *,
+    run_id: Optional[str] = None,
+    trace_tickers: Optional[Iterable[str]] = None,
 ) -> BacktestResult:
     """Run a multi-asset backtest using vectorbt."""
 
@@ -172,130 +176,205 @@ def run_backtest(
     tp_map: Dict[str, pd.Series] = {}
     signals: Dict[str, pd.DataFrame] = {}
 
-    for ticker, raw_df in data.items():
-        df = raw_df.copy()
-        if isinstance(df.columns, pd.MultiIndex):
-            needed = ['open', 'high', 'low', 'close', 'volume']
-            mapping = {str(col).lower(): col for col in df.columns.get_level_values(-1)}
-            extracted = {}
-            for field in needed:
-                actual = mapping.get(field)
-                if actual is None:
-                    raise KeyError(f"'{field}' column missing for {ticker}")
-                series = df.xs(actual, axis=1, level=-1)
-                if isinstance(series, pd.DataFrame) and 'Ticker' in series.columns:
-                    series = series['Ticker']
-                if isinstance(series, pd.DataFrame):
-                    if _STRICT:
-                        raise ValueError(f"{field} for {ticker} expanded to shape {series.shape}")
-                    series = series.iloc[:, 0]
-                extracted[field] = series
-            df = pd.DataFrame(extracted, index=df.index)
+    trace_set = {t.upper() for t in trace_tickers} if trace_tickers else set()
 
-        if 'close' not in df.columns:
-            raise KeyError(f"'close' column missing for {ticker} after flattening")
+    run_token = push_context(run_id=run_id, strategy=strategy.name)
+    try:
+        for ticker, raw_df in data.items():
+            ticker_token = push_context(ticker=ticker)
+            try:
+                df = raw_df.copy()
+                if isinstance(df.columns, pd.MultiIndex):
+                    raise ValueError(
+                        f"Data for {ticker} still has MultiIndex columns; ensure ingest normalization ran. Columns sample: {list(df.columns)[:5]}"
+                    )
 
-        assert isinstance(df['close'], pd.Series), f"close column for {ticker} is not Series: {type(df['close'])}"
-        features = strategy.compute_features(df).reindex(df.index)
-        joined = df.copy()
-        for column in features.columns:
-            joined[column] = features[column]
-        ticker_signals = strategy.generate_signals(joined)
-        if _DEBUG:
-            _LOG.debug("strategy signals[%s]: type=%s shape=%s columns=%s", ticker, type(ticker_signals).__name__, getattr(ticker_signals, 'shape', None), getattr(ticker_signals, 'columns', None))
+                if "close" not in df.columns:
+                    raise KeyError(
+                        f"'close' column missing for {ticker}; columns={list(df.columns)[:10]}"
+                    )
 
-        signals[ticker] = ticker_signals
-        close_map[ticker] = df["close"]
+                if _LOG.isEnabledFor(logging.INFO):
+                    _LOG.info(
+                        "ticker_loaded rows=%d start=%s end=%s",
+                        len(df),
+                        df.index.min(),
+                        df.index.max(),
+                    )
 
-        entry_series = _standardize_series(
-            ticker,
-            "entries_manual",
-            ticker_signals.get("entry_long", pd.Series(False, index=df.index)),
-            df.index,
-            bool,
-            False,
-        )
-        entry_map[ticker] = entry_series
+                assert isinstance(df["close"], pd.Series), (
+                    f"close column for {ticker} is not Series: {type(df['close'])}"
+                )
+                features = strategy.compute_features(df).reindex(df.index)
+                joined = df.copy()
+                for column in features.columns:
+                    joined[column] = features[column]
+                ticker_signals = strategy.generate_signals(joined)
+                if _LOG.isEnabledFor(logging.DEBUG):
+                    _LOG.debug(
+                        "strategy_signals type=%s shape=%s columns=%s",
+                        type(ticker_signals).__name__,
+                        getattr(ticker_signals, "shape", None),
+                        getattr(ticker_signals, "columns", None),
+                    )
 
-        exit_manual = _standardize_series(
-            ticker,
-            "exits_manual",
-            ticker_signals.get("exit_long", pd.Series(False, index=df.index)),
-            df.index,
-            bool,
-            False,
-        )
+                signals[ticker] = ticker_signals
+                close_map[ticker] = df["close"]
 
-        stop_series = _standardize_series(
-            ticker,
-            "stop_loss_raw",
-            ticker_signals.get("sl_price", pd.Series(np.nan, index=df.index)),
-            df.index,
-            float,
-            np.nan,
-        ).ffill()
-        sl_map[ticker] = stop_series
+                entry_series = _standardize_series(
+                    ticker,
+                    "entries_manual",
+                    ticker_signals.get("entry_long", pd.Series(False, index=df.index)),
+                    df.index,
+                    bool,
+                    False,
+                )
+                entry_map[ticker] = entry_series
 
-        target_series = _standardize_series(
-            ticker,
-            "take_profit_raw",
-            ticker_signals.get("tp_price", pd.Series(np.nan, index=df.index)),
-            df.index,
-            float,
-            np.nan,
-        ).ffill()
-        tp_map[ticker] = target_series
+                exit_manual = _standardize_series(
+                    ticker,
+                    "exits_manual",
+                    ticker_signals.get("exit_long", pd.Series(False, index=df.index)),
+                    df.index,
+                    bool,
+                    False,
+                )
 
-        exit_sl = df["close"].le(stop_series)
-        exit_tp = df["close"].ge(target_series)
+                stop_series = _standardize_series(
+                    ticker,
+                    "stop_loss_raw",
+                    ticker_signals.get("sl_price", pd.Series(np.nan, index=df.index)),
+                    df.index,
+                    float,
+                    np.nan,
+                ).ffill()
+                sl_map[ticker] = stop_series
 
-        exit_map[ticker] = (exit_manual | exit_sl | exit_tp).shift(1, fill_value=False)
+                target_series = _standardize_series(
+                    ticker,
+                    "take_profit_raw",
+                    ticker_signals.get("tp_price", pd.Series(np.nan, index=df.index)),
+                    df.index,
+                    float,
+                    np.nan,
+                ).ffill()
+                tp_map[ticker] = target_series
 
-        if _DEBUG:
-            _LOG.debug("exit components[%s]: manual=%s sl=%s tp=%s result=%s",
-                ticker, type(exit_manual).__name__, type(exit_sl).__name__, type(exit_tp).__name__, type(exit_map[ticker]).__name__)
+                exit_sl = df["close"].le(stop_series)
+                exit_tp = df["close"].ge(target_series)
 
-    close_df = pd.concat(close_map, axis=1)
-    close_df.columns = pd.Index(close_map.keys())
-    close_df = close_df.sort_index()
-    tickers = list(close_df.columns)
-    master_index = close_df.index
+                exit_map[ticker] = (exit_manual | exit_sl | exit_tp).shift(1, fill_value=False)
 
-    entries_df = _build_matrix("entries", entry_map, tickers, master_index, bool)
-    exits_df = _build_matrix("exits", exit_map, tickers, master_index, bool)
-    sl_df = _build_matrix("stop_loss", sl_map, tickers, master_index, float)
-    tp_df = _build_matrix("take_profit", tp_map, tickers, master_index, float)
+                if _LOG.isEnabledFor(logging.DEBUG):
+                    _LOG.debug(
+                        "signal_counts entries=%d exits=%d sl_nan=%d tp_nan=%d",
+                        int(entry_series.sum()),
+                        int(exit_manual.sum()),
+                        int(stop_series.isna().sum()),
+                        int(target_series.isna().sum()),
+                    )
+            finally:
+                pop_context(ticker_token)
 
-    if _DEBUG:
-        _LOG.debug(
-            "aligned matrices: entries=%s exits=%s stop=%s take=%s",
+        close_df = pd.concat(close_map, axis=1)
+        close_df.columns = pd.Index(close_map.keys())
+        close_df = close_df.sort_index()
+        tickers = list(close_df.columns)
+        master_index = close_df.index
+
+        entries_df = _build_matrix("entries", entry_map, tickers, master_index, bool)
+        exits_df = _build_matrix("exits", exit_map, tickers, master_index, bool)
+        sl_df = _build_matrix("stop_loss", sl_map, tickers, master_index, float)
+        tp_df = _build_matrix("take_profit", tp_map, tickers, master_index, float)
+
+        _LOG.info(
+            "assembled_matrices entries=%s exits=%s stop=%s take=%s",
             entries_df.shape,
             exits_df.shape,
             sl_df.shape,
             tp_df.shape,
         )
 
-    returns = close_df.pct_change().fillna(0.0)
-    masked_entries = apply_risk_rules(entries_df, exits_df, returns, risk)
+        returns = close_df.pct_change().fillna(0.0)
 
-    size_df = sizes_fixed_risk(close_df, sl_df, risk.risk_pct)
-    size_df = size_df.where(masked_entries, other=0.0)
+        size_result = sizes_fixed_risk(
+            close_df,
+            sl_df,
+            risk.risk_pct,
+            return_diagnostics=_LOG.isEnabledFor(logging.DEBUG),
+        )
+        if isinstance(size_result, tuple):
+            size_df, size_diag = size_result
+            for ticker, diag in size_diag.items():
+                _LOG.debug("sizer_stats %s %s", ticker, diag)
+        else:
+            size_df = size_result
 
-    portfolio = vbt.Portfolio.from_signals(
-        close=close_df,
-        entries=masked_entries,
-        exits=exits_df,
-        size=size_df,
-        fees=universe.fees_pct,
-        slippage=universe.slippage_pct,
-    )
+        masked_entries, risk_stats = apply_risk_rules(
+            entries_df,
+            exits_df,
+            returns,
+            risk,
+            return_stats=True,
+        )
+        _LOG.info("risk_mask_stats %s", risk_stats)
 
-    return BacktestResult(
-        portfolio=portfolio,
-        entries=masked_entries,
-        exits=exits_df,
-        signals=signals,
-    )
+        size_df = size_df.where(masked_entries, other=0.0)
+
+        portfolio = vbt.Portfolio.from_signals(
+            close=close_df,
+            entries=masked_entries,
+            exits=exits_df,
+            size=size_df,
+            fees=universe.fees_pct,
+            slippage=universe.slippage_pct,
+        )
+
+        trades_records = portfolio.trades.records
+        trades_count = len(trades_records)
+        total_return_obj = portfolio.total_return()
+        if isinstance(total_return_obj, (pd.Series, pd.DataFrame)):
+            total_return_value = float(total_return_obj.sum()) if not total_return_obj.empty else 0.0
+        else:
+            total_return_value = float(total_return_obj)
+        exposure = float(masked_entries.any(axis=1).mean()) if not masked_entries.empty else 0.0
+        _LOG.info(
+            "portfolio_summary trades=%d total_return=%.4f exposure=%.4f",
+            trades_count,
+            total_return_value,
+            exposure,
+        )
+
+        trace_outputs: Dict[str, pd.DataFrame] = {}
+        if trace_set:
+            for ticker in tickers:
+                if ticker.upper() not in trace_set:
+                    continue
+                trace_outputs[ticker] = pd.DataFrame(
+                    {
+                        "open": data[ticker]["open"],
+                        "high": data[ticker]["high"],
+                        "low": data[ticker]["low"],
+                        "close": close_df[ticker],
+                        "volume": data[ticker]["volume"],
+                        "entry_raw": entries_df[ticker],
+                        "entry_final": masked_entries[ticker],
+                        "exit": exits_df[ticker],
+                        "stop": sl_df[ticker],
+                        "target": tp_df[ticker] if ticker in tp_df.columns else pd.Series(index=master_index, dtype=float),
+                        "size": size_df[ticker],
+                    }
+                )
+
+        return BacktestResult(
+            portfolio=portfolio,
+            entries=masked_entries,
+            exits=exits_df,
+            signals=signals,
+            trace_data=trace_outputs or None,
+        )
+    finally:
+        pop_context(run_token)
 
 
 __all__ = ["BacktestResult", "run_backtest", "register_strategy", "get_strategy"]

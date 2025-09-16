@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
 from itertools import product
 from pathlib import Path
 from typing import Dict, Iterable, Iterator, List
@@ -15,6 +14,7 @@ from vectr_lab.backtest.plots import param_heatmap
 from vectr_lab.backtest.runner import run_backtest
 from vectr_lab.config.models import RiskConfig, StrategyConfig, UniverseConfig
 from vectr_lab.strategies.ma_cross import MovingAverageCrossStrategy
+from vectr_lab.utils.time import now_utc
 
 
 def _expand_grid(grid: Dict[str, Iterable]) -> Iterator[Dict[str, object]]:
@@ -36,7 +36,7 @@ def run_grid_scan(
 
     results: List[Dict[str, object]] = []
     metric_keys: List[str] = []
-    timestamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+    timestamp = now_utc().strftime("%Y%m%d-%H%M%S")
     out_dir = output_root or Path("artifacts/scans") / timestamp
     out_dir.mkdir(parents=True, exist_ok=True)
 
